@@ -1,7 +1,7 @@
 # Sparkplug B ESP32 Temperature Node
 ESP-IDF firmware for a classic ESP32 Sparkplug B node that reads a TMP36 on `GPIO32` / `ADC1_CHANNEL_4`, converts the reading to Celsius, and publishes Sparkplug B protobuf payloads over MQTT alongside a synthetic sinewave metric.
 
-For more informatino about Eclipse Sparkplug B, see https://github.com/eclipse-sparkplug/sparkplug  (Sparkplug®, Sparkplug Compatible, and the Sparkplug Logo are trademarks of the Eclipse Foundation.)
+For more information about Eclipse Sparkplug B, see https://github.com/eclipse-sparkplug/sparkplug  (Sparkplug®, Sparkplug Compatible, and the Sparkplug Logo are trademarks of the Eclipse Foundation.)
 
 ## Project Notes
 This repo is a quick, fun embedded project of mine, not a polished production firmware baseline!
