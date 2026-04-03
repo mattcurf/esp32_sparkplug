@@ -10,7 +10,3 @@
 
 # Host-specific cruft
 .DS_Store
-
-# nanob generated
-components/sparkplug_node/vendor/eclipse_tahu/sparkplug_b.pb.c
-components/sparkplug_node/vendor/eclipse_tahu/sparkplug_b.pb.h
