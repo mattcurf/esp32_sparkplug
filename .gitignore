@@ -1,0 +1,16 @@
+# ESP-IDF local build outputs
+/build/
+
+# ESP-IDF generated local configuration
+/sdkconfig
+/sdkconfig.old
+
+# ESP-IDF managed component download cache
+/managed_components/
+
+# Host-specific cruft
+.DS_Store
+
+# nanob generated
+components/sparkplug_node/vendor/eclipse_tahu/sparkplug_b.pb.c
+components/sparkplug_node/vendor/eclipse_tahu/sparkplug_b.pb.h

@@ -1,0 +1,36 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    env:
+      ESP_IDF_VERSION: v6.0
+      ESP_TARGET: esp32
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install ESP-IDF
+        uses: espressif/install-esp-idf-action@v1
+        with:
+          version: ${{ env.ESP_IDF_VERSION }}
+
+      - name: Run host bootstrap
+        run: ./scripts/bootstrap.sh
+
+      - name: Build firmware
+        run: ./scripts/build.sh
