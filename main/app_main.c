@@ -156,6 +156,8 @@ static esp_err_t app_get_sparkplug_status(app_console_sparkplug_status_t *status
     status->session_active = session_status.session_active;
     status->birth_complete = session_status.birth_complete;
     status->rebirth_pending = session_status.rebirth_pending;
+    status->disconnect_sim_enabled = session_status.disconnect_sim_enabled;
+    status->disconnect_sim_active = session_status.disconnect_sim_active;
     status->bdseq = (uint8_t)(session_status.bdseq & 0xFFU);
     status->seq = session_status.seq;
     status->last_publish_ms = session_status.last_publish_ms;
@@ -173,6 +175,12 @@ static esp_err_t app_request_rebirth(void *ctx)
 {
     (void)ctx;
     return sparkplug_session_request_rebirth();
+}
+
+static esp_err_t app_set_disconnect_sim_enabled(bool enabled, void *ctx)
+{
+    (void)ctx;
+    return sparkplug_session_set_disconnect_sim_enabled(enabled);
 }
 
 static void app_sensor_task(void *arg)
@@ -209,6 +217,7 @@ static void app_initialize_console(void)
         .get_sparkplug_status = app_get_sparkplug_status,
         .request_publish = app_request_publish,
         .request_rebirth = app_request_rebirth,
+        .set_disconnect_sim_enabled = app_set_disconnect_sim_enabled,
     };
 
     ESP_ERROR_CHECK(app_console_init());

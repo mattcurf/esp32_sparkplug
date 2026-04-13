@@ -21,7 +21,7 @@ The original project code in this repository is licensed under Apache 2.0. This 
 - `sensor_tmp36`: ADC oneshot init, calibration, 32-sample averaging, millivolt conversion, Celsius conversion, and cached reading snapshots
 - `wifi_manager`: station init/start, reconnect handling, and status queries
 - `time_sync`: SNTP startup, valid-time gating, and time status queries
-- `sparkplug_node`: vendored Sparkplug schema + nanopb runtime, topic building, payload encode/decode, MQTT session ownership, birth/death lifecycle, rebirth handling, and publish policy
+- `sparkplug_node`: vendored Sparkplug schema + nanopb runtime, topic building, payload encode/decode, MQTT session ownership, birth/death lifecycle, rebirth handling, publish policy, and periodic disconnect simulation for Primary host death handling
 - `app_console`: UART REPL with runtime diagnostics and manual publish/rebirth actions
 - `app_main`: startup ordering and top-level wiring only
 
@@ -41,6 +41,8 @@ Before flashing real hardware, update the placeholder connection settings in [co
 - set `.sparkplug.broker_uri` to your MQTT broker URI, for example `mqtt://broker-host-or-ip:1883`
 - if your broker requires authentication, set `.sparkplug.username` and `.sparkplug.password`
 - if your broker does not require authentication, leave `.sparkplug.username` and `.sparkplug.password` as `NULL`
+
+For TLS brokers, point `.sparkplug.broker_uri` at an `mqtts://` endpoint such as `mqtts://broker-host-or-ip:8883` and replace the embedded CA chain in [components/sparkplug_node/certs/ca-chain.cert.pem](components/sparkplug_node/certs/ca-chain.cert.pem) with the PEM chain that signs your broker certificate.
 
 The repository intentionally ships with placeholders for Wi-Fi and MQTT connection details so it can be published safely as open source.
 
@@ -69,6 +71,18 @@ Implemented message types:
 - `NDEATH`
 - `NCMD` rebirth decode
 
+## Disconnect Simulation
+
+By default, the node periodically simulates an ungraceful network loss to exercise Sparkplug B Primary host death handling:
+
+- enabled by default at boot
+- disconnects every `2 minutes`
+- each disconnect lasts `15 seconds`
+- uses a temporary Wi-Fi drop so the MQTT session ends ungracefully and the broker can publish the node death certificate / last will behavior
+- after Wi-Fi returns and the station has an IP again, the node reconnects, republishes `NBIRTH`, and resumes normal `NDATA`
+
+This behavior is intended for validation and demo use, not for long-running stable operation.
+
 ## Console Commands
 
 The UART console exposes:
@@ -79,9 +93,16 @@ The UART console exposes:
 - `time`
 - `mqtt`
 - `sparkplug`
+- `disconnect_sim [status|on|off]`
 - `publish`
 - `rebirth`
 - `restart`
+
+`disconnect_sim` control notes:
+
+- `disconnect_sim` or `disconnect_sim status` shows whether the simulator is enabled and whether a simulated outage is active right now
+- `disconnect_sim off` disables future simulated disconnects
+- `disconnect_sim on` re-enables the default periodic disconnect behavior
 
 ## Pinned ESP-IDF Version
 

@@ -210,6 +210,9 @@ static int cmd_status(int argc, char **argv)
                    sparkplug.bdseq,
                    sparkplug.seq,
                    sparkplug.last_message[0] != '\0' ? sparkplug.last_message : "<none>");
+            printf("sparkplug: disconnect_sim_enabled=%s disconnect_sim_active=%s\n",
+                   app_bool_to_str(sparkplug.disconnect_sim_enabled),
+                   app_bool_to_str(sparkplug.disconnect_sim_active));
         }
     } else {
         app_console_print_provider_unwired("sparkplug");
@@ -356,11 +359,69 @@ static int cmd_sparkplug(int argc, char **argv)
     printf("sparkplug.session_active=%s\n", app_bool_to_str(status.session_active));
     printf("sparkplug.birth_complete=%s\n", app_bool_to_str(status.birth_complete));
     printf("sparkplug.rebirth_pending=%s\n", app_bool_to_str(status.rebirth_pending));
+    printf("sparkplug.disconnect_sim_enabled=%s\n", app_bool_to_str(status.disconnect_sim_enabled));
+    printf("sparkplug.disconnect_sim_active=%s\n", app_bool_to_str(status.disconnect_sim_active));
     printf("sparkplug.bdSeq=%u\n", status.bdseq);
     printf("sparkplug.seq=%u\n", status.seq);
     printf("sparkplug.last_publish_ms=%" PRIi64 "\n", status.last_publish_ms);
     printf("sparkplug.last_message=%s\n",
            status.last_message[0] != '\0' ? status.last_message : "<none>");
+    return 0;
+}
+
+static int cmd_disconnect_sim(int argc, char **argv)
+{
+    app_console_providers_t providers = {0};
+    app_console_snapshot_providers(&providers);
+
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "status") == 0)) {
+        app_console_sparkplug_status_t status = {0};
+        esp_err_t err;
+
+        if (providers.get_sparkplug_status == NULL) {
+            app_console_print_provider_unwired("disconnect_sim");
+            return 0;
+        }
+
+        err = providers.get_sparkplug_status(&status, providers.sparkplug_status_ctx);
+        if (err != ESP_OK) {
+            return app_console_report_provider_error("disconnect_sim", err);
+        }
+
+        printf("disconnect_sim.enabled=%s\n", app_bool_to_str(status.disconnect_sim_enabled));
+        printf("disconnect_sim.active=%s\n", app_bool_to_str(status.disconnect_sim_active));
+        printf("disconnect_sim.interval_ms=%d\n", 120000);
+        printf("disconnect_sim.duration_ms=%d\n", 15000);
+        return 0;
+    }
+
+    if (argc != 2) {
+        printf("usage: disconnect_sim [status|on|off]\n");
+        return 1;
+    }
+
+    if (providers.set_disconnect_sim_enabled == NULL) {
+        app_console_print_provider_unwired("disconnect_sim");
+        return 0;
+    }
+
+    bool enabled;
+    if (strcmp(argv[1], "on") == 0) {
+        enabled = true;
+    } else if (strcmp(argv[1], "off") == 0) {
+        enabled = false;
+    } else {
+        printf("usage: disconnect_sim [status|on|off]\n");
+        return 1;
+    }
+
+    esp_err_t err = providers.set_disconnect_sim_enabled(enabled, providers.disconnect_sim_ctx);
+    if (err != ESP_OK) {
+        printf("disconnect_sim: request failed (%s)\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("disconnect_sim: %s\n", enabled ? "enabled" : "disabled");
     return 0;
 }
 
@@ -434,6 +495,7 @@ static esp_err_t app_console_register_commands_once(void)
         {"time", "Show SNTP/time synchronization snapshot", cmd_time},
         {"mqtt", "Show MQTT transport snapshot", cmd_mqtt},
         {"sparkplug", "Show Sparkplug session snapshot", cmd_sparkplug},
+        {"disconnect_sim", "Control the periodic Sparkplug disconnect simulator", cmd_disconnect_sim},
         {"publish", "Request an immediate NDATA publish", cmd_publish},
         {"rebirth", "Request a fresh NBIRTH sequence", cmd_rebirth},
         {"restart", "Restart the device", cmd_restart},
