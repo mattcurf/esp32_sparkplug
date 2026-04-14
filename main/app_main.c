@@ -269,6 +269,8 @@ static esp_err_t app_get_sparkplug_status(app_console_sparkplug_status_t *status
     status->rebirth_pending = session_status.rebirth_pending;
     status->disconnect_sim_enabled = session_status.disconnect_sim_enabled;
     status->disconnect_sim_active = session_status.disconnect_sim_active;
+    status->disconnect_sim_interval_ms = session_status.disconnect_sim_interval_ms;
+    status->disconnect_sim_duration_ms = session_status.disconnect_sim_duration_ms;
     status->bdseq = (uint8_t)(session_status.bdseq & 0xFFU);
     status->seq = session_status.seq;
     status->last_publish_ms = session_status.last_publish_ms;

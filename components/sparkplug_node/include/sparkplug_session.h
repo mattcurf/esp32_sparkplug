@@ -25,6 +25,8 @@ typedef struct {
     bool has_temperature;
     bool disconnect_sim_enabled;
     bool disconnect_sim_active;
+    int64_t disconnect_sim_interval_ms;
+    int64_t disconnect_sim_duration_ms;
     uint32_t mqtt_reconnect_count;
     uint64_t bdseq;
     uint8_t seq;

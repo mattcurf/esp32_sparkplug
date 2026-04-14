@@ -159,6 +159,8 @@ static void sparkplug_session_refresh_status(void)
     s_state.status_snapshot.has_temperature = s_state.has_temperature;
     s_state.status_snapshot.disconnect_sim_enabled = s_state.disconnect_sim_enabled;
     s_state.status_snapshot.disconnect_sim_active = s_state.disconnect_sim_active;
+    s_state.status_snapshot.disconnect_sim_interval_ms = SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS;
+    s_state.status_snapshot.disconnect_sim_duration_ms = SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS;
     s_state.status_snapshot.mqtt_reconnect_count = s_state.mqtt_reconnect_count;
     s_state.status_snapshot.bdseq = s_state.bdseq;
     s_state.status_snapshot.seq = s_state.seq;
@@ -515,23 +517,26 @@ static void sparkplug_session_handle_reconnect_transition(void)
 static TickType_t sparkplug_session_next_wait_ticks(void)
 {
     int64_t now_ms = sparkplug_session_monotonic_ms();
-    int64_t wait_ms = -1;
+    int64_t wait_ms = 0;
     TickType_t wait_ticks;
     int64_t candidate_ms;
+    bool has_pending_timer = false;
 
     if (s_state.disconnect_sim_enabled && s_state.reconnect_enabled && s_state.disconnect_sim_next_transition_ms != 0) {
         candidate_ms = s_state.disconnect_sim_next_transition_ms - now_ms;
         wait_ms = candidate_ms;
+        has_pending_timer = true;
     }
 
     if (s_state.reconnect_enabled && s_state.reconnect_attempt_due_ms != 0) {
         candidate_ms = s_state.reconnect_attempt_due_ms - now_ms;
-        if (wait_ms < 0 || candidate_ms < wait_ms) {
+        if (!has_pending_timer || candidate_ms < wait_ms) {
             wait_ms = candidate_ms;
         }
+        has_pending_timer = true;
     }
 
-    if (wait_ms < 0) {
+    if (!has_pending_timer) {
         return portMAX_DELAY;
     }
     if (wait_ms <= 0) {

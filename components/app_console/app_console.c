@@ -390,8 +390,8 @@ static int cmd_disconnect_sim(int argc, char **argv)
 
         printf("disconnect_sim.enabled=%s\n", app_bool_to_str(status.disconnect_sim_enabled));
         printf("disconnect_sim.active=%s\n", app_bool_to_str(status.disconnect_sim_active));
-        printf("disconnect_sim.interval_ms=%d\n", 120000);
-        printf("disconnect_sim.duration_ms=%d\n", 15000);
+        printf("disconnect_sim.interval_ms=%" PRIi64 "\n", status.disconnect_sim_interval_ms);
+        printf("disconnect_sim.duration_ms=%" PRIi64 "\n", status.disconnect_sim_duration_ms);
         return 0;
     }
 

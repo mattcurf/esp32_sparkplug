@@ -57,6 +57,8 @@ typedef struct {
     bool rebirth_pending;
     bool disconnect_sim_enabled;
     bool disconnect_sim_active;
+    int64_t disconnect_sim_interval_ms;
+    int64_t disconnect_sim_duration_ms;
     uint8_t bdseq;
     uint8_t seq;
     int64_t last_publish_ms;
