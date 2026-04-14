@@ -6,6 +6,7 @@
 
 #include "app_config.h"
 #include "app_console.h"
+#include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -20,6 +21,11 @@
 #include "freertos/task.h"
 #include "freertos/portmacro.h"
 
+#define STATUS_LED_TASK_STACK_SIZE 2048
+#define STATUS_LED_TASK_PRIORITY 4
+#define STATUS_LED_TASK_INTERVAL_MS 50U
+#define STATUS_LED_PULSE_PERIOD_MS 500U
+#define STATUS_LED_PULSE_ON_MS 100U
 #define SENSOR_TASK_STACK_SIZE 4096
 #define SENSOR_TASK_PRIORITY 5
 
@@ -31,8 +37,113 @@ typedef struct {
     int64_t sample_time_ms;
 } app_sensor_snapshot_t;
 
+typedef enum {
+    APP_STATUS_LED_MODE_OFF = 0,
+    APP_STATUS_LED_MODE_PULSE,
+    APP_STATUS_LED_MODE_ON,
+} app_status_led_mode_t;
+
 static app_sensor_snapshot_t s_sensor_snapshot;
 static portMUX_TYPE s_sensor_snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_status_led_mqtt_connected;
+static portMUX_TYPE s_status_led_state_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void app_set_status_led(bool on)
+{
+    const app_config_status_led_t *status_led = &app_config_get()->status_led;
+    int level = on ? 1 : 0;
+
+    if (!status_led->active_high) {
+        level = !level;
+    }
+
+    ESP_ERROR_CHECK(gpio_set_level(status_led->gpio_num, level));
+}
+
+static bool app_status_led_mqtt_connected(void)
+{
+    bool mqtt_connected;
+
+    portENTER_CRITICAL(&s_status_led_state_lock);
+    mqtt_connected = s_status_led_mqtt_connected;
+    portEXIT_CRITICAL(&s_status_led_state_lock);
+    return mqtt_connected;
+}
+
+static void app_handle_sparkplug_status_update(const sparkplug_session_status_t *status, void *ctx)
+{
+    (void)ctx;
+    if (status == NULL) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_status_led_state_lock);
+    s_status_led_mqtt_connected = status->mqtt_connected;
+    portEXIT_CRITICAL(&s_status_led_state_lock);
+}
+
+static void app_initialize_status_led(void)
+{
+    const app_config_status_led_t *status_led = &app_config_get()->status_led;
+    const gpio_config_t io_config = {
+        .pin_bit_mask = 1ULL << (uint32_t)status_led->gpio_num,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    ESP_ERROR_CHECK(gpio_config(&io_config));
+    app_set_status_led(false);
+    ESP_LOGI(TAG,
+             "status LED configured on GPIO %d active_%s",
+             status_led->gpio_num,
+             status_led->active_high ? "high" : "low");
+}
+
+static void app_status_led_task(void *arg)
+{
+    const TickType_t interval_ticks = pdMS_TO_TICKS(STATUS_LED_TASK_INTERVAL_MS);
+    TickType_t last_wake_time = xTaskGetTickCount();
+    app_status_led_mode_t mode = APP_STATUS_LED_MODE_OFF;
+    app_status_led_mode_t previous_mode = APP_STATUS_LED_MODE_OFF;
+    uint32_t pulse_elapsed_ms = 0;
+    (void)arg;
+
+    while (true) {
+        if (app_status_led_mqtt_connected()) {
+            mode = APP_STATUS_LED_MODE_ON;
+        } else if (wifi_manager_has_ip()) {
+            mode = APP_STATUS_LED_MODE_PULSE;
+        } else {
+            mode = APP_STATUS_LED_MODE_OFF;
+        }
+
+        if (mode != previous_mode) {
+            pulse_elapsed_ms = 0;
+            previous_mode = mode;
+        }
+
+        switch (mode) {
+        case APP_STATUS_LED_MODE_ON:
+            app_set_status_led(true);
+            break;
+        case APP_STATUS_LED_MODE_PULSE:
+            app_set_status_led(pulse_elapsed_ms < STATUS_LED_PULSE_ON_MS);
+            pulse_elapsed_ms += STATUS_LED_TASK_INTERVAL_MS;
+            if (pulse_elapsed_ms >= STATUS_LED_PULSE_PERIOD_MS) {
+                pulse_elapsed_ms = 0;
+            }
+            break;
+        case APP_STATUS_LED_MODE_OFF:
+        default:
+            app_set_status_led(false);
+            break;
+        }
+
+        vTaskDelayUntil(&last_wake_time, interval_ticks);
+    }
+}
 
 static void app_store_sensor_snapshot(const sensor_tmp36_reading_t *reading, int64_t sample_time_ms)
 {
@@ -248,6 +359,16 @@ void app_main(void)
     app_initialize_nvs();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    app_initialize_status_led();
+    if (xTaskCreate(app_status_led_task,
+                    "status_led",
+                    STATUS_LED_TASK_STACK_SIZE,
+                    NULL,
+                    STATUS_LED_TASK_PRIORITY,
+                    NULL) != pdPASS) {
+        ESP_LOGE(TAG, "failed to start status LED task");
+        abort();
+    }
 
     ESP_ERROR_CHECK(wifi_manager_init());
     ESP_ERROR_CHECK(wifi_manager_start());
@@ -262,6 +383,7 @@ void app_main(void)
     app_store_sensor_snapshot(&initial_reading, initial_sample_time_ms);
 
     ESP_ERROR_CHECK(sparkplug_session_init());
+    ESP_ERROR_CHECK(sparkplug_session_set_status_callback(app_handle_sparkplug_status_update, NULL));
     ESP_ERROR_CHECK(sparkplug_session_submit_temperature(&initial_reading, initial_sample_time_ms));
     ESP_ERROR_CHECK(sparkplug_session_start());
 

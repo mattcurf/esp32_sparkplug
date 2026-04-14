@@ -27,8 +27,8 @@
 #define SPARKPLUG_SESSION_SYNTHETIC_MAX_VALUE 100.0f
 #define SPARKPLUG_SESSION_SYNTHETIC_PERIOD_MS 20000LL
 #define SPARKPLUG_SESSION_SYNTHETIC_TWO_PI 6.28318530718f
-#define SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS 120000LL
-#define SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS 15000U
+#define SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS 180000LL
+#define SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS 90000U
 
 typedef enum {
     SPARKPLUG_SESSION_CMD_START = 0,
@@ -54,6 +54,8 @@ typedef struct {
     QueueHandle_t queue;
     TaskHandle_t task;
     esp_mqtt_client_handle_t client;
+    sparkplug_session_status_callback_t status_callback;
+    void *status_callback_ctx;
     bool initialized;
     bool reconnect_enabled;
     bool mqtt_configured;
@@ -67,6 +69,7 @@ typedef struct {
     bool has_last_published_temperature;
     bool disconnect_sim_enabled;
     bool disconnect_sim_active;
+    bool bdseq_initialized;
     uint32_t mqtt_reconnect_count;
     uint64_t bdseq;
     uint8_t seq;
@@ -141,6 +144,10 @@ static void sparkplug_session_set_last_message(const char *message)
 
 static void sparkplug_session_refresh_status(void)
 {
+    sparkplug_session_status_t status_snapshot = {0};
+    sparkplug_session_status_callback_t status_callback;
+    void *status_callback_ctx;
+
     portENTER_CRITICAL(&s_status_lock);
     s_state.status_snapshot.mqtt_configured = s_state.mqtt_configured;
     s_state.status_snapshot.mqtt_started = s_state.mqtt_started;
@@ -161,7 +168,14 @@ static void sparkplug_session_refresh_status(void)
     memcpy(s_state.status_snapshot.last_message,
            s_state.last_message,
            sizeof(s_state.status_snapshot.last_message));
+    status_snapshot = s_state.status_snapshot;
+    status_callback = s_state.status_callback;
+    status_callback_ctx = s_state.status_callback_ctx;
     portEXIT_CRITICAL(&s_status_lock);
+
+    if (status_callback != NULL) {
+        status_callback(&status_snapshot, status_callback_ctx);
+    }
 }
 
 static void sparkplug_session_schedule_disconnect_sim(int64_t delay_ms)
@@ -412,11 +426,11 @@ static esp_err_t sparkplug_session_prepare_topics(void)
                                       sizeof(s_state.topic_ncmd));
 }
 
-static esp_err_t sparkplug_session_prepare_will_payload(void)
+static esp_err_t sparkplug_session_prepare_will_payload(uint64_t bdseq)
 {
     sparkplug_node_death_payload_t will_payload = {
         .timestamp_ms = (uint64_t)time_sync_now_ms(),
-        .bdseq = s_state.bdseq,
+        .bdseq = bdseq,
     };
     return sparkplug_node_encode_ndeath(&will_payload,
                                         s_state.will_payload,
@@ -535,11 +549,11 @@ static esp_err_t sparkplug_session_start_client(void)
 {
     esp_mqtt_client_config_t mqtt_config = {0};
     const char *broker_uri = app_config_get()->sparkplug.broker_uri;
+    const uint64_t next_bdseq = s_state.bdseq_initialized ? (uint64_t)((uint8_t)(s_state.bdseq + 1U)) : 0U;
     const bool uses_tls = broker_uri != NULL
                           && (strncmp(broker_uri, MQTT_OVER_SSL_SCHEME "://", strlen(MQTT_OVER_SSL_SCHEME "://")) == 0
                               || strncmp(broker_uri, MQTT_OVER_WSS_SCHEME "://", strlen(MQTT_OVER_WSS_SCHEME "://")) == 0);
 
-    s_state.bdseq++;
     s_state.seq = 0U;
     s_state.birth_complete = false;
     s_state.ncmd_subscribed = false;
@@ -548,7 +562,7 @@ static esp_err_t sparkplug_session_start_client(void)
     sparkplug_session_set_last_message("");
 
     ESP_RETURN_ON_ERROR(sparkplug_session_prepare_topics(), TAG, "failed to build Sparkplug topics");
-    ESP_RETURN_ON_ERROR(sparkplug_session_prepare_will_payload(), TAG, "failed to encode NDEATH will payload");
+    ESP_RETURN_ON_ERROR(sparkplug_session_prepare_will_payload(next_bdseq), TAG, "failed to encode NDEATH will payload");
 
     mqtt_config.broker.address.uri = broker_uri;
     if (uses_tls) {
@@ -562,7 +576,7 @@ static esp_err_t sparkplug_session_start_client(void)
     mqtt_config.session.last_will.topic = s_state.topic_ndeath;
     mqtt_config.session.last_will.msg = (const char *)s_state.will_payload;
     mqtt_config.session.last_will.msg_len = (int)s_state.will_payload_len;
-    mqtt_config.session.last_will.qos = 0;
+    mqtt_config.session.last_will.qos = 1;
     mqtt_config.session.last_will.retain = false;
     mqtt_config.network.disable_auto_reconnect = true;
 
@@ -579,6 +593,8 @@ static esp_err_t sparkplug_session_start_client(void)
                         "failed to register mqtt events");
     ESP_RETURN_ON_ERROR(esp_mqtt_client_start(s_state.client), TAG, "failed to start mqtt client");
 
+    s_state.bdseq_initialized = true;
+    s_state.bdseq = next_bdseq;
     s_state.mqtt_configured = true;
     s_state.mqtt_started = true;
     sparkplug_session_refresh_status();
@@ -669,7 +685,7 @@ static void sparkplug_session_handle_command(const sparkplug_session_cmd_t *cmd)
     case SPARKPLUG_SESSION_CMD_MQTT_CONNECTED:
         s_state.mqtt_connected = true;
         s_state.session_active = true;
-        s_state.ncmd_subscribe_msg_id = esp_mqtt_client_subscribe(s_state.client, s_state.topic_ncmd, 0);
+        s_state.ncmd_subscribe_msg_id = esp_mqtt_client_subscribe(s_state.client, s_state.topic_ncmd, 1);
         sparkplug_session_refresh_status();
         if (s_state.ncmd_subscribe_msg_id < 0) {
             ESP_LOGE(TAG, "failed to subscribe to NCMD topic");
@@ -872,6 +888,23 @@ esp_err_t sparkplug_session_set_disconnect_sim_enabled(bool enabled)
     }
 
     return sparkplug_session_queue_command(&cmd, pdMS_TO_TICKS(100)) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t sparkplug_session_set_status_callback(sparkplug_session_status_callback_t callback, void *ctx)
+{
+    sparkplug_session_status_t status_snapshot = {0};
+
+    portENTER_CRITICAL(&s_status_lock);
+    s_state.status_callback = callback;
+    s_state.status_callback_ctx = ctx;
+    status_snapshot = s_state.status_snapshot;
+    portEXIT_CRITICAL(&s_status_lock);
+
+    if (callback != NULL) {
+        callback(&status_snapshot, ctx);
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t sparkplug_session_get_status(sparkplug_session_status_t *status)

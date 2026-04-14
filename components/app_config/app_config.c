@@ -43,6 +43,10 @@ static const app_config_t s_app_config = {
         .sync_wait_timeout_ms = 30000U,
         .sync_poll_interval_ms = 500U,
     },
+    .status_led = {
+        .gpio_num = GPIO_NUM_2,
+        .active_high = true,
+    },
 };
 
 const app_config_t *app_config_get(void)
