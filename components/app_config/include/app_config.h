@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "driver/gpio.h"
@@ -56,12 +57,18 @@ typedef struct {
 } app_config_time_t;
 
 typedef struct {
+    gpio_num_t gpio_num;
+    bool active_high;
+} app_config_status_led_t;
+
+typedef struct {
     const char *target_chip;
     app_config_wifi_t wifi;
     app_config_sparkplug_t sparkplug;
     app_config_sensor_t sensor;
     app_config_temperature_t temperature;
     app_config_time_t time;
+    app_config_status_led_t status_led;
 } app_config_t;
 
 const app_config_t *app_config_get(void);

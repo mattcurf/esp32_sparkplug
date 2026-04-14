@@ -8,9 +8,11 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "mqtt_client.h"
 #include "sparkplug_node.h"
 #include "time_sync.h"
+#include "wifi_manager.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "freertos/queue.h"
@@ -25,6 +27,8 @@
 #define SPARKPLUG_SESSION_SYNTHETIC_MAX_VALUE 100.0f
 #define SPARKPLUG_SESSION_SYNTHETIC_PERIOD_MS 20000LL
 #define SPARKPLUG_SESSION_SYNTHETIC_TWO_PI 6.28318530718f
+#define SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS 180000LL
+#define SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS 90000U
 
 typedef enum {
     SPARKPLUG_SESSION_CMD_START = 0,
@@ -36,18 +40,22 @@ typedef enum {
     SPARKPLUG_SESSION_CMD_MQTT_DISCONNECTED,
     SPARKPLUG_SESSION_CMD_MQTT_SUBSCRIBED,
     SPARKPLUG_SESSION_CMD_MQTT_REBIRTH_REQUEST,
+    SPARKPLUG_SESSION_CMD_SET_DISCONNECT_SIM_ENABLED,
 } sparkplug_session_cmd_type_t;
 
 typedef struct {
     sparkplug_session_cmd_type_t type;
     sensor_tmp36_reading_t reading;
     int64_t sample_time_ms;
+    bool enabled;
 } sparkplug_session_cmd_t;
 
 typedef struct {
     QueueHandle_t queue;
     TaskHandle_t task;
     esp_mqtt_client_handle_t client;
+    sparkplug_session_status_callback_t status_callback;
+    void *status_callback_ctx;
     bool initialized;
     bool reconnect_enabled;
     bool mqtt_configured;
@@ -59,6 +67,9 @@ typedef struct {
     bool rebirth_pending;
     bool has_temperature;
     bool has_last_published_temperature;
+    bool disconnect_sim_enabled;
+    bool disconnect_sim_active;
+    bool bdseq_initialized;
     uint32_t mqtt_reconnect_count;
     uint64_t bdseq;
     uint8_t seq;
@@ -66,6 +77,8 @@ typedef struct {
     float last_published_temperature_c;
     int64_t last_sample_ms;
     int64_t last_publish_ms;
+    int64_t reconnect_attempt_due_ms;
+    int64_t disconnect_sim_next_transition_ms;
     char last_message[SPARKPLUG_SESSION_LAST_MESSAGE_MAX_LEN + 1];
     char topic_nbirth[SPARKPLUG_SESSION_TOPIC_MAX_LEN];
     char topic_ndata[SPARKPLUG_SESSION_TOPIC_MAX_LEN];
@@ -81,12 +94,23 @@ static const char *TAG = "sparkplug_session";
 static sparkplug_session_state_t s_state;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 
+extern const uint8_t mqtt_broker_ca_chain_cert_pem_start[] asm("_binary_ca_chain_cert_pem_start");
+
 static bool sparkplug_session_queue_command(const sparkplug_session_cmd_t *cmd, TickType_t timeout_ticks);
 static void sparkplug_session_refresh_status(void);
+static esp_err_t sparkplug_session_start_client(void);
 static void sparkplug_session_mqtt_event_handler(void *handler_args,
                                                  esp_event_base_t base,
                                                  int32_t event_id,
                                                  void *event_data);
+static void sparkplug_session_handle_reconnect_transition(void);
+static void sparkplug_session_handle_disconnect_sim_transition(void);
+static TickType_t sparkplug_session_next_wait_ticks(void);
+
+static int64_t sparkplug_session_monotonic_ms(void)
+{
+    return esp_timer_get_time() / 1000;
+}
 
 static float sparkplug_session_synthetic_sinewave_at_ms(int64_t timestamp_ms)
 {
@@ -120,6 +144,10 @@ static void sparkplug_session_set_last_message(const char *message)
 
 static void sparkplug_session_refresh_status(void)
 {
+    sparkplug_session_status_t status_snapshot = {0};
+    sparkplug_session_status_callback_t status_callback;
+    void *status_callback_ctx;
+
     portENTER_CRITICAL(&s_status_lock);
     s_state.status_snapshot.mqtt_configured = s_state.mqtt_configured;
     s_state.status_snapshot.mqtt_started = s_state.mqtt_started;
@@ -129,6 +157,10 @@ static void sparkplug_session_refresh_status(void)
     s_state.status_snapshot.birth_complete = s_state.birth_complete;
     s_state.status_snapshot.rebirth_pending = s_state.rebirth_pending;
     s_state.status_snapshot.has_temperature = s_state.has_temperature;
+    s_state.status_snapshot.disconnect_sim_enabled = s_state.disconnect_sim_enabled;
+    s_state.status_snapshot.disconnect_sim_active = s_state.disconnect_sim_active;
+    s_state.status_snapshot.disconnect_sim_interval_ms = SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS;
+    s_state.status_snapshot.disconnect_sim_duration_ms = SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS;
     s_state.status_snapshot.mqtt_reconnect_count = s_state.mqtt_reconnect_count;
     s_state.status_snapshot.bdseq = s_state.bdseq;
     s_state.status_snapshot.seq = s_state.seq;
@@ -138,7 +170,69 @@ static void sparkplug_session_refresh_status(void)
     memcpy(s_state.status_snapshot.last_message,
            s_state.last_message,
            sizeof(s_state.status_snapshot.last_message));
+    status_snapshot = s_state.status_snapshot;
+    status_callback = s_state.status_callback;
+    status_callback_ctx = s_state.status_callback_ctx;
     portEXIT_CRITICAL(&s_status_lock);
+
+    if (status_callback != NULL) {
+        status_callback(&status_snapshot, status_callback_ctx);
+    }
+}
+
+static void sparkplug_session_schedule_disconnect_sim(int64_t delay_ms)
+{
+    if (!s_state.disconnect_sim_enabled || !s_state.reconnect_enabled) {
+        s_state.disconnect_sim_next_transition_ms = 0;
+        return;
+    }
+
+    s_state.disconnect_sim_next_transition_ms = sparkplug_session_monotonic_ms() + delay_ms;
+}
+
+static void sparkplug_session_schedule_reconnect_attempt(int64_t delay_ms)
+{
+    if (!s_state.reconnect_enabled) {
+        s_state.reconnect_attempt_due_ms = 0;
+        return;
+    }
+
+    s_state.reconnect_attempt_due_ms = sparkplug_session_monotonic_ms() + delay_ms;
+}
+
+static void sparkplug_session_set_disconnect_sim_enabled_internal(bool enabled)
+{
+    esp_err_t err;
+
+    if (enabled == s_state.disconnect_sim_enabled) {
+        if (enabled && s_state.reconnect_enabled && s_state.disconnect_sim_next_transition_ms == 0) {
+            sparkplug_session_schedule_disconnect_sim(SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS);
+            sparkplug_session_refresh_status();
+        }
+        return;
+    }
+
+    s_state.disconnect_sim_enabled = enabled;
+    if (!enabled) {
+        if (s_state.disconnect_sim_active) {
+            err = wifi_manager_resume_simulated_disconnect();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to resume Wi-Fi after disabling disconnect simulator: %s", esp_err_to_name(err));
+            }
+        }
+        s_state.disconnect_sim_active = false;
+        s_state.disconnect_sim_next_transition_ms = 0;
+        ESP_LOGI(TAG, "disconnect simulator disabled");
+    } else {
+        s_state.disconnect_sim_active = false;
+        sparkplug_session_schedule_disconnect_sim(SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS);
+        ESP_LOGI(TAG,
+                 "disconnect simulator enabled: disconnect every %lld ms for %u ms",
+                 (long long)SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS,
+                 SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS);
+    }
+
+    sparkplug_session_refresh_status();
 }
 
 static void sparkplug_session_store_sample(const sensor_tmp36_reading_t *reading, int64_t sample_time_ms)
@@ -334,11 +428,11 @@ static esp_err_t sparkplug_session_prepare_topics(void)
                                       sizeof(s_state.topic_ncmd));
 }
 
-static esp_err_t sparkplug_session_prepare_will_payload(void)
+static esp_err_t sparkplug_session_prepare_will_payload(uint64_t bdseq)
 {
     sparkplug_node_death_payload_t will_payload = {
         .timestamp_ms = (uint64_t)time_sync_now_ms(),
-        .bdseq = s_state.bdseq,
+        .bdseq = bdseq,
     };
     return sparkplug_node_encode_ndeath(&will_payload,
                                         s_state.will_payload,
@@ -364,11 +458,107 @@ static void sparkplug_session_destroy_client(void)
     sparkplug_session_refresh_status();
 }
 
+static void sparkplug_session_handle_disconnect_sim_transition(void)
+{
+    esp_err_t err;
+
+    if (!s_state.disconnect_sim_enabled || !s_state.reconnect_enabled || s_state.disconnect_sim_next_transition_ms == 0) {
+        return;
+    }
+    if (sparkplug_session_monotonic_ms() < s_state.disconnect_sim_next_transition_ms) {
+        return;
+    }
+
+    if (!s_state.disconnect_sim_active) {
+        err = wifi_manager_simulate_disconnect(SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to start simulated disconnect: %s", esp_err_to_name(err));
+            sparkplug_session_schedule_disconnect_sim(SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS);
+        } else {
+            s_state.disconnect_sim_active = true;
+            sparkplug_session_schedule_disconnect_sim(SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS);
+            ESP_LOGW(TAG,
+                     "simulating Sparkplug disconnect for %u ms to exercise primary host death handling",
+                     SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS);
+        }
+    } else {
+        s_state.disconnect_sim_active = false;
+        sparkplug_session_schedule_disconnect_sim(SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS);
+        ESP_LOGI(TAG, "simulated Sparkplug disconnect window ended");
+    }
+
+    sparkplug_session_refresh_status();
+}
+
+static void sparkplug_session_handle_reconnect_transition(void)
+{
+    esp_err_t err;
+
+    if (!s_state.reconnect_enabled || s_state.client != NULL || s_state.reconnect_attempt_due_ms == 0) {
+        return;
+    }
+    if (sparkplug_session_monotonic_ms() < s_state.reconnect_attempt_due_ms) {
+        return;
+    }
+    if (!wifi_manager_has_ip()) {
+        s_state.reconnect_attempt_due_ms = sparkplug_session_monotonic_ms() + 1000;
+        return;
+    }
+
+    err = sparkplug_session_start_client();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to restart MQTT session: %s", esp_err_to_name(err));
+        s_state.reconnect_attempt_due_ms = sparkplug_session_monotonic_ms() + 1000;
+    } else {
+        s_state.reconnect_attempt_due_ms = 0;
+    }
+}
+
+static TickType_t sparkplug_session_next_wait_ticks(void)
+{
+    int64_t now_ms = sparkplug_session_monotonic_ms();
+    int64_t wait_ms = 0;
+    TickType_t wait_ticks;
+    int64_t candidate_ms;
+    bool has_pending_timer = false;
+
+    if (s_state.disconnect_sim_enabled && s_state.reconnect_enabled && s_state.disconnect_sim_next_transition_ms != 0) {
+        candidate_ms = s_state.disconnect_sim_next_transition_ms - now_ms;
+        wait_ms = candidate_ms;
+        has_pending_timer = true;
+    }
+
+    if (s_state.reconnect_enabled && s_state.reconnect_attempt_due_ms != 0) {
+        candidate_ms = s_state.reconnect_attempt_due_ms - now_ms;
+        if (!has_pending_timer || candidate_ms < wait_ms) {
+            wait_ms = candidate_ms;
+        }
+        has_pending_timer = true;
+    }
+
+    if (!has_pending_timer) {
+        return portMAX_DELAY;
+    }
+    if (wait_ms <= 0) {
+        return 0;
+    }
+    if (wait_ms > (int64_t)UINT32_MAX) {
+        wait_ms = (int64_t)UINT32_MAX;
+    }
+
+    wait_ticks = pdMS_TO_TICKS((uint32_t)wait_ms);
+    return wait_ticks == 0 ? 1 : wait_ticks;
+}
+
 static esp_err_t sparkplug_session_start_client(void)
 {
     esp_mqtt_client_config_t mqtt_config = {0};
+    const char *broker_uri = app_config_get()->sparkplug.broker_uri;
+    const uint64_t next_bdseq = s_state.bdseq_initialized ? (uint64_t)((uint8_t)(s_state.bdseq + 1U)) : 0U;
+    const bool uses_tls = broker_uri != NULL
+                          && (strncmp(broker_uri, MQTT_OVER_SSL_SCHEME "://", strlen(MQTT_OVER_SSL_SCHEME "://")) == 0
+                              || strncmp(broker_uri, MQTT_OVER_WSS_SCHEME "://", strlen(MQTT_OVER_WSS_SCHEME "://")) == 0);
 
-    s_state.bdseq++;
     s_state.seq = 0U;
     s_state.birth_complete = false;
     s_state.ncmd_subscribed = false;
@@ -377,9 +567,12 @@ static esp_err_t sparkplug_session_start_client(void)
     sparkplug_session_set_last_message("");
 
     ESP_RETURN_ON_ERROR(sparkplug_session_prepare_topics(), TAG, "failed to build Sparkplug topics");
-    ESP_RETURN_ON_ERROR(sparkplug_session_prepare_will_payload(), TAG, "failed to encode NDEATH will payload");
+    ESP_RETURN_ON_ERROR(sparkplug_session_prepare_will_payload(next_bdseq), TAG, "failed to encode NDEATH will payload");
 
-    mqtt_config.broker.address.uri = app_config_get()->sparkplug.broker_uri;
+    mqtt_config.broker.address.uri = broker_uri;
+    if (uses_tls) {
+        mqtt_config.broker.verification.certificate = (const char *)mqtt_broker_ca_chain_cert_pem_start;
+    }
     mqtt_config.credentials.username = app_config_get()->sparkplug.username;
     mqtt_config.credentials.authentication.password = app_config_get()->sparkplug.password;
     mqtt_config.session.protocol_ver = MQTT_PROTOCOL_V_3_1_1;
@@ -388,7 +581,7 @@ static esp_err_t sparkplug_session_start_client(void)
     mqtt_config.session.last_will.topic = s_state.topic_ndeath;
     mqtt_config.session.last_will.msg = (const char *)s_state.will_payload;
     mqtt_config.session.last_will.msg_len = (int)s_state.will_payload_len;
-    mqtt_config.session.last_will.qos = 0;
+    mqtt_config.session.last_will.qos = 1;
     mqtt_config.session.last_will.retain = false;
     mqtt_config.network.disable_auto_reconnect = true;
 
@@ -405,6 +598,8 @@ static esp_err_t sparkplug_session_start_client(void)
                         "failed to register mqtt events");
     ESP_RETURN_ON_ERROR(esp_mqtt_client_start(s_state.client), TAG, "failed to start mqtt client");
 
+    s_state.bdseq_initialized = true;
+    s_state.bdseq = next_bdseq;
     s_state.mqtt_configured = true;
     s_state.mqtt_started = true;
     sparkplug_session_refresh_status();
@@ -447,6 +642,9 @@ static void sparkplug_session_handle_command(const sparkplug_session_cmd_t *cmd)
     switch (cmd->type) {
     case SPARKPLUG_SESSION_CMD_START:
         s_state.reconnect_enabled = true;
+        if (s_state.disconnect_sim_enabled && s_state.disconnect_sim_next_transition_ms == 0) {
+            sparkplug_session_schedule_disconnect_sim(SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS);
+        }
         if (s_state.client == NULL) {
             err = sparkplug_session_start_client();
             if (err != ESP_OK) {
@@ -456,6 +654,15 @@ static void sparkplug_session_handle_command(const sparkplug_session_cmd_t *cmd)
         break;
     case SPARKPLUG_SESSION_CMD_STOP:
         s_state.reconnect_enabled = false;
+        s_state.reconnect_attempt_due_ms = 0;
+        s_state.disconnect_sim_next_transition_ms = 0;
+        if (s_state.disconnect_sim_active) {
+            err = wifi_manager_resume_simulated_disconnect();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to resume Wi-Fi during stop: %s", esp_err_to_name(err));
+            }
+            s_state.disconnect_sim_active = false;
+        }
         if (s_state.mqtt_connected) {
             err = sparkplug_session_publish_death();
             if (err != ESP_OK) {
@@ -477,10 +684,13 @@ static void sparkplug_session_handle_command(const sparkplug_session_cmd_t *cmd)
         sparkplug_session_refresh_status();
         sparkplug_session_maybe_publish_after_sample(false);
         break;
+    case SPARKPLUG_SESSION_CMD_SET_DISCONNECT_SIM_ENABLED:
+        sparkplug_session_set_disconnect_sim_enabled_internal(cmd->enabled);
+        break;
     case SPARKPLUG_SESSION_CMD_MQTT_CONNECTED:
         s_state.mqtt_connected = true;
         s_state.session_active = true;
-        s_state.ncmd_subscribe_msg_id = esp_mqtt_client_subscribe(s_state.client, s_state.topic_ncmd, 0);
+        s_state.ncmd_subscribe_msg_id = esp_mqtt_client_subscribe(s_state.client, s_state.topic_ncmd, 1);
         sparkplug_session_refresh_status();
         if (s_state.ncmd_subscribe_msg_id < 0) {
             ESP_LOGE(TAG, "failed to subscribe to NCMD topic");
@@ -501,11 +711,7 @@ static void sparkplug_session_handle_command(const sparkplug_session_cmd_t *cmd)
         s_state.mqtt_reconnect_count++;
         sparkplug_session_destroy_client();
         if (s_state.reconnect_enabled) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            err = sparkplug_session_start_client();
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "failed to restart MQTT session: %s", esp_err_to_name(err));
-            }
+            sparkplug_session_schedule_reconnect_attempt(1000);
         }
         break;
     default:
@@ -521,8 +727,11 @@ static void sparkplug_session_task(void *arg)
     (void)arg;
 
     while (true) {
-        if (xQueueReceive(s_state.queue, &cmd, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_state.queue, &cmd, sparkplug_session_next_wait_ticks()) == pdTRUE) {
             sparkplug_session_handle_command(&cmd);
+        } else {
+            sparkplug_session_handle_reconnect_transition();
+            sparkplug_session_handle_disconnect_sim_transition();
         }
     }
 }
@@ -598,6 +807,7 @@ esp_err_t sparkplug_session_init(void)
     }
 
     s_state.initialized = true;
+    s_state.disconnect_sim_enabled = true;
     memset(&s_state.status_snapshot, 0, sizeof(s_state.status_snapshot));
     sparkplug_session_set_last_message("");
     sparkplug_session_refresh_status();
@@ -669,6 +879,37 @@ esp_err_t sparkplug_session_request_rebirth(void)
     }
 
     return sparkplug_session_queue_command(&cmd, pdMS_TO_TICKS(100)) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t sparkplug_session_set_disconnect_sim_enabled(bool enabled)
+{
+    sparkplug_session_cmd_t cmd = {
+        .type = SPARKPLUG_SESSION_CMD_SET_DISCONNECT_SIM_ENABLED,
+        .enabled = enabled,
+    };
+
+    if (!s_state.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return sparkplug_session_queue_command(&cmd, pdMS_TO_TICKS(100)) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t sparkplug_session_set_status_callback(sparkplug_session_status_callback_t callback, void *ctx)
+{
+    sparkplug_session_status_t status_snapshot = {0};
+
+    portENTER_CRITICAL(&s_status_lock);
+    s_state.status_callback = callback;
+    s_state.status_callback_ctx = ctx;
+    status_snapshot = s_state.status_snapshot;
+    portEXIT_CRITICAL(&s_status_lock);
+
+    if (callback != NULL) {
+        callback(&status_snapshot, ctx);
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t sparkplug_session_get_status(sparkplug_session_status_t *status)

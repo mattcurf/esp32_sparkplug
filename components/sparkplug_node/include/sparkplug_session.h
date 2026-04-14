@@ -23,6 +23,10 @@ typedef struct {
     bool birth_complete;
     bool rebirth_pending;
     bool has_temperature;
+    bool disconnect_sim_enabled;
+    bool disconnect_sim_active;
+    int64_t disconnect_sim_interval_ms;
+    int64_t disconnect_sim_duration_ms;
     uint32_t mqtt_reconnect_count;
     uint64_t bdseq;
     uint8_t seq;
@@ -32,6 +36,8 @@ typedef struct {
     char last_message[SPARKPLUG_SESSION_LAST_MESSAGE_MAX_LEN + 1];
 } sparkplug_session_status_t;
 
+typedef void (*sparkplug_session_status_callback_t)(const sparkplug_session_status_t *status, void *ctx);
+
 esp_err_t sparkplug_session_init(void);
 esp_err_t sparkplug_session_start(void);
 esp_err_t sparkplug_session_stop(void);
@@ -39,6 +45,8 @@ esp_err_t sparkplug_session_submit_temperature(const sensor_tmp36_reading_t *rea
                                                int64_t sample_time_ms);
 esp_err_t sparkplug_session_request_publish(void);
 esp_err_t sparkplug_session_request_rebirth(void);
+esp_err_t sparkplug_session_set_disconnect_sim_enabled(bool enabled);
+esp_err_t sparkplug_session_set_status_callback(sparkplug_session_status_callback_t callback, void *ctx);
 esp_err_t sparkplug_session_get_status(sparkplug_session_status_t *status);
 
 #ifdef __cplusplus

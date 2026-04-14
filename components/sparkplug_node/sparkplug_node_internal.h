@@ -9,6 +9,7 @@
 
 typedef enum {
     SPARKPLUG_NODE_VALUE_UINT64 = 0,
+    SPARKPLUG_NODE_VALUE_INT64,
     SPARKPLUG_NODE_VALUE_BOOL,
     SPARKPLUG_NODE_VALUE_FLOAT,
 } sparkplug_node_metric_value_type_t;
@@ -24,6 +25,7 @@ typedef struct {
     sparkplug_node_metric_value_type_t value_type;
     union {
         uint64_t uint64_value;
+        int64_t int64_value;
         bool bool_value;
         float float_value;
     } value;

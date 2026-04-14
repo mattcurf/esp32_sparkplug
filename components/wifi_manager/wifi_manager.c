@@ -8,6 +8,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -26,6 +27,9 @@ typedef struct {
     esp_ip4_addr_t ipv4_addr;
     esp_netif_t *sta_netif;
     EventGroupHandle_t event_group;
+    esp_timer_handle_t reconnect_timer;
+    bool reconnect_suppressed;
+    bool simulated_disconnect_active;
 } wifi_manager_state_t;
 
 static wifi_manager_state_t s_state;
@@ -35,6 +39,7 @@ static void wifi_manager_event_handler(void *arg,
                                        esp_event_base_t event_base,
                                        int32_t event_id,
                                        void *event_data);
+static void wifi_manager_reconnect_timer_callback(void *arg);
 
 static void wifi_manager_cleanup_init_failure(void)
 {
@@ -46,6 +51,11 @@ static void wifi_manager_cleanup_init_failure(void)
     esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_manager_event_handler);
     esp_wifi_deinit();
 
+    if (s_state.reconnect_timer != NULL) {
+        esp_timer_stop(s_state.reconnect_timer);
+        esp_timer_delete(s_state.reconnect_timer);
+    }
+
     if (s_state.event_group != NULL) {
         vEventGroupDelete(s_state.event_group);
     }
@@ -56,6 +66,27 @@ static void wifi_manager_cleanup_init_failure(void)
 static const app_config_wifi_t *wifi_manager_config(void)
 {
     return &app_config_get()->wifi;
+}
+
+static void wifi_manager_issue_connect_request(void)
+{
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void wifi_manager_reconnect_timer_callback(void *arg)
+{
+    (void)arg;
+
+    portENTER_CRITICAL(&s_state_lock);
+    s_state.reconnect_suppressed = false;
+    s_state.simulated_disconnect_active = false;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    ESP_LOGI(TAG, "ending simulated Wi-Fi disconnect and requesting reconnect");
+    wifi_manager_issue_connect_request();
 }
 
 static void wifi_manager_event_handler(void *arg,
@@ -72,7 +103,7 @@ static void wifi_manager_event_handler(void *arg,
                 return;
             }
             ESP_LOGI(TAG, "station started, connecting to %s", wifi_manager_config()->ssid);
-            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_connect());
+            wifi_manager_issue_connect_request();
             return;
         case WIFI_EVENT_STA_CONNECTED:
             portENTER_CRITICAL(&s_state_lock);
@@ -83,6 +114,8 @@ static void wifi_manager_event_handler(void *arg,
         case WIFI_EVENT_STA_DISCONNECTED: {
             const wifi_event_sta_disconnected_t *disconnected = event_data;
             uint32_t reconnect_count;
+            bool reconnect_suppressed;
+            bool simulated_disconnect_active;
 
             portENTER_CRITICAL(&s_state_lock);
             s_state.connected = false;
@@ -90,6 +123,8 @@ static void wifi_manager_event_handler(void *arg,
             s_state.ipv4_addr.addr = 0;
             s_state.reconnect_count++;
             reconnect_count = s_state.reconnect_count;
+            reconnect_suppressed = s_state.reconnect_suppressed;
+            simulated_disconnect_active = s_state.simulated_disconnect_active;
             portEXIT_CRITICAL(&s_state_lock);
 
             if (s_state.event_group != NULL) {
@@ -100,7 +135,13 @@ static void wifi_manager_event_handler(void *arg,
                      "disconnected reason=%" PRIu8 ", reconnect_count=%" PRIu32,
                      disconnected != NULL ? disconnected->reason : 0,
                      reconnect_count);
-            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_connect());
+            if (reconnect_suppressed) {
+                ESP_LOGI(TAG,
+                         "reconnect suppressed while simulated disconnect is active=%s",
+                         simulated_disconnect_active ? "true" : "false");
+            } else {
+                wifi_manager_issue_connect_request();
+            }
             return;
         }
         default:
@@ -173,6 +214,16 @@ esp_err_t wifi_manager_init(void)
     }
 
     err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        wifi_manager_cleanup_init_failure();
+        return err;
+    }
+
+    const esp_timer_create_args_t reconnect_timer_args = {
+        .callback = wifi_manager_reconnect_timer_callback,
+        .name = "wifi_sim_reconnect",
+    };
+    err = esp_timer_create(&reconnect_timer_args, &s_state.reconnect_timer);
     if (err != ESP_OK) {
         wifi_manager_cleanup_init_failure();
         return err;
@@ -298,5 +349,66 @@ esp_err_t wifi_manager_get_status(wifi_manager_status_t *status)
         }
     }
 
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_simulate_disconnect(uint32_t duration_ms)
+{
+    esp_err_t err;
+
+    if (!s_state.started || s_state.reconnect_timer == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (duration_ms == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = esp_timer_stop(s_state.reconnect_timer);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    s_state.reconnect_suppressed = true;
+    s_state.simulated_disconnect_active = true;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    err = esp_timer_start_once(s_state.reconnect_timer, (uint64_t)duration_ms * 1000ULL);
+    if (err != ESP_OK) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_state.reconnect_suppressed = false;
+        s_state.simulated_disconnect_active = false;
+        portEXIT_CRITICAL(&s_state_lock);
+        return err;
+    }
+
+    ESP_LOGI(TAG, "starting simulated Wi-Fi disconnect for %" PRIu32 " ms", duration_ms);
+    err = esp_wifi_disconnect();
+    if (err == ESP_ERR_WIFI_NOT_CONNECT) {
+        return ESP_OK;
+    }
+    return err;
+}
+
+esp_err_t wifi_manager_resume_simulated_disconnect(void)
+{
+    esp_err_t err;
+
+    if (!s_state.started || s_state.reconnect_timer == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    err = esp_timer_stop(s_state.reconnect_timer);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    s_state.reconnect_suppressed = false;
+    s_state.simulated_disconnect_active = false;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    ESP_LOGI(TAG, "resuming Wi-Fi after simulated disconnect");
+    wifi_manager_issue_connect_request();
     return ESP_OK;
 }

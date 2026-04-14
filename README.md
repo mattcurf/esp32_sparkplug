@@ -21,13 +21,19 @@ The original project code in this repository is licensed under Apache 2.0. This 
 - `sensor_tmp36`: ADC oneshot init, calibration, 32-sample averaging, millivolt conversion, Celsius conversion, and cached reading snapshots
 - `wifi_manager`: station init/start, reconnect handling, and status queries
 - `time_sync`: SNTP startup, valid-time gating, and time status queries
-- `sparkplug_node`: vendored Sparkplug schema + nanopb runtime, topic building, payload encode/decode, MQTT session ownership, birth/death lifecycle, rebirth handling, and publish policy
+- `sparkplug_node`: vendored Sparkplug schema + nanopb runtime, topic building, payload encode/decode, MQTT session ownership, birth/death lifecycle, rebirth handling, publish policy, and periodic disconnect simulation for Primary host death handling
 - `app_console`: UART REPL with runtime diagnostics and manual publish/rebirth actions
-- `app_main`: startup ordering and top-level wiring only
+- `app_main`: startup ordering, top-level wiring, and MQTT connection status LED updates
+
+## Deliberate Out-Of-Scope Items
+- No Device support (`DBIRTH` / `DDATA` / `DDEATH` / `DCMD`). This firmware is intentionally node-only, and Sparkplug devices are optional.
+- No Primary Host wait (`PHID`). This implementation does not delay node birth publication waiting for a Primary Host identity, which is optional per the spec.
+- No multi-MQTT-server support. This is optional per the spec and only relevant when a Primary Host is configured to coordinate multiple brokers.
 
 ## Fixed Runtime Inputs
 - Target: `esp32`
 - Sensor: `TMP36` on `GPIO32` / `ADC1_CHANNEL_4`
+- MQTT status LED default: `GPIO2`, active-high
 - Broker default: `mqtt://broker.example.com:1883`
 - Sparkplug group ID: `home`
 - Sparkplug node ID: `sensor`
@@ -41,8 +47,17 @@ Before flashing real hardware, update the placeholder connection settings in [co
 - set `.sparkplug.broker_uri` to your MQTT broker URI, for example `mqtt://broker-host-or-ip:1883`
 - if your broker requires authentication, set `.sparkplug.username` and `.sparkplug.password`
 - if your broker does not require authentication, leave `.sparkplug.username` and `.sparkplug.password` as `NULL`
+- if your board uses a different LED pin or LED polarity, update `.status_led.gpio_num` and `.status_led.active_high`
+
+For TLS brokers, point `.sparkplug.broker_uri` at an `mqtts://` endpoint such as `mqtts://broker-host-or-ip:8883` and replace the embedded CA chain in [components/sparkplug_node/certs/ca-chain.cert.pem](components/sparkplug_node/certs/ca-chain.cert.pem) with the PEM chain that signs your broker certificate.
 
 The repository intentionally ships with placeholders for Wi-Fi and MQTT connection details so it can be published safely as open source.
+
+The status LED is driven from the connection state:
+
+- off while booting or whenever Wi-Fi does not yet have an IP address
+- brief pulse every `0.5 s` while Wi-Fi is up but MQTT is not yet connected
+- solid on while the node is connected to the MQTT broker
 
 ## Published Metrics
 The node publishes these Sparkplug metrics:
@@ -69,6 +84,18 @@ Implemented message types:
 - `NDEATH`
 - `NCMD` rebirth decode
 
+## Disconnect Simulation
+
+By default, the node periodically simulates an ungraceful network loss to exercise Sparkplug B Primary host death handling:
+
+- enabled by default at boot
+- disconnects every `3 minutes`
+- each disconnect lasts `90 seconds`
+- uses a temporary Wi-Fi drop so the MQTT session ends ungracefully and the broker can publish the node death certificate / last will behavior
+- after Wi-Fi returns and the station has an IP again, the node reconnects, republishes `NBIRTH`, and resumes normal `NDATA`
+
+This behavior is intended for validation and demo use, not for long-running stable operation.
+
 ## Console Commands
 
 The UART console exposes:
@@ -79,9 +106,16 @@ The UART console exposes:
 - `time`
 - `mqtt`
 - `sparkplug`
+- `disconnect_sim [status|on|off]`
 - `publish`
 - `rebirth`
 - `restart`
+
+`disconnect_sim` control notes:
+
+- `disconnect_sim` or `disconnect_sim status` shows whether the simulator is enabled and whether a simulated outage is active right now
+- `disconnect_sim off` disables future simulated disconnects
+- `disconnect_sim on` re-enables the default periodic disconnect behavior
 
 ## Pinned ESP-IDF Version
 

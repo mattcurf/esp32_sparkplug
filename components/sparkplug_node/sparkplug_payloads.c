@@ -48,6 +48,10 @@ static bool sparkplug_node_encode_metric(
         metric.which_value = org_eclipse_tahu_protobuf_Payload_Metric_long_value_tag;
         metric.value.long_value = descriptor->value.uint64_value;
         break;
+    case SPARKPLUG_NODE_VALUE_INT64:
+        metric.which_value = org_eclipse_tahu_protobuf_Payload_Metric_long_value_tag;
+        metric.value.long_value = descriptor->value.int64_value;
+        break;
     case SPARKPLUG_NODE_VALUE_BOOL:
         metric.which_value = org_eclipse_tahu_protobuf_Payload_Metric_boolean_value_tag;
         metric.value.boolean_value = descriptor->value.bool_value;
@@ -123,9 +127,9 @@ esp_err_t sparkplug_node_encode_nbirth(
         {
             .name = SPARKPLUG_NODE_METRIC_NAME_BDSEQ,
             .has_datatype = true,
-            .datatype = org_eclipse_tahu_protobuf_DataType_UInt64,
-            .value_type = SPARKPLUG_NODE_VALUE_UINT64,
-            .value.uint64_value = payload != NULL ? payload->bdseq : 0U,
+            .datatype = org_eclipse_tahu_protobuf_DataType_Int64,
+            .value_type = SPARKPLUG_NODE_VALUE_INT64,
+            .value.int64_value = payload != NULL ? (int64_t)payload->bdseq : 0,
         },
         {
             .name = SPARKPLUG_NODE_METRIC_NAME_NODE_CONTROL_REBIRTH,
@@ -231,9 +235,9 @@ esp_err_t sparkplug_node_encode_ndeath(
         {
             .name = SPARKPLUG_NODE_METRIC_NAME_BDSEQ,
             .has_datatype = true,
-            .datatype = org_eclipse_tahu_protobuf_DataType_UInt64,
-            .value_type = SPARKPLUG_NODE_VALUE_UINT64,
-            .value.uint64_value = payload != NULL ? payload->bdseq : 0U,
+            .datatype = org_eclipse_tahu_protobuf_DataType_Int64,
+            .value_type = SPARKPLUG_NODE_VALUE_INT64,
+            .value.int64_value = payload != NULL ? (int64_t)payload->bdseq : 0,
         },
     };
     const sparkplug_node_metric_list_t metric_list = {

@@ -27,6 +27,8 @@ bool wifi_manager_is_connected(void);
 bool wifi_manager_has_ip(void);
 esp_err_t wifi_manager_wait_connected(uint32_t timeout_ms);
 esp_err_t wifi_manager_get_status(wifi_manager_status_t *status);
+esp_err_t wifi_manager_simulate_disconnect(uint32_t duration_ms);
+esp_err_t wifi_manager_resume_simulated_disconnect(void);
 
 #ifdef __cplusplus
 }

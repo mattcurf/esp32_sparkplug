@@ -55,6 +55,10 @@ typedef struct {
     bool session_active;
     bool birth_complete;
     bool rebirth_pending;
+    bool disconnect_sim_enabled;
+    bool disconnect_sim_active;
+    int64_t disconnect_sim_interval_ms;
+    int64_t disconnect_sim_duration_ms;
     uint8_t bdseq;
     uint8_t seq;
     int64_t last_publish_ms;
@@ -72,6 +76,7 @@ typedef esp_err_t (*app_console_get_mqtt_status_fn)(app_console_mqtt_status_t *s
 typedef esp_err_t (*app_console_get_sparkplug_status_fn)(app_console_sparkplug_status_t *status,
                                                          void *ctx);
 typedef esp_err_t (*app_console_action_fn)(void *ctx);
+typedef esp_err_t (*app_console_set_enabled_fn)(bool enabled, void *ctx);
 
 typedef struct {
     app_console_get_sensor_status_fn get_sensor_status;
@@ -88,6 +93,8 @@ typedef struct {
     void *publish_ctx;
     app_console_action_fn request_rebirth;
     void *rebirth_ctx;
+    app_console_set_enabled_fn set_disconnect_sim_enabled;
+    void *disconnect_sim_ctx;
 } app_console_providers_t;
 
 /*

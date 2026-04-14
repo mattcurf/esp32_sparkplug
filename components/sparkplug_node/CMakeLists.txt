@@ -13,7 +13,8 @@ idf_component_register(
         "."
         "vendor/eclipse_tahu"
         "vendor/nanopb"
-    REQUIRES app_config mqtt sensor_tmp36 time_sync
+    EMBED_TXTFILES "certs/ca-chain.cert.pem"
+    REQUIRES app_config esp_timer mqtt sensor_tmp36 time_sync wifi_manager
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE PB_FIELD_32BIT=1)
