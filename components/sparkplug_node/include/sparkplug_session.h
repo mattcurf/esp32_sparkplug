@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Matt Curfman
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 #include <stdbool.h>
@@ -25,6 +30,8 @@ typedef struct {
     bool has_temperature;
     bool disconnect_sim_enabled;
     bool disconnect_sim_active;
+    bool primary_host_configured;
+    bool primary_host_online;
     int64_t disconnect_sim_interval_ms;
     int64_t disconnect_sim_duration_ms;
     uint32_t mqtt_reconnect_count;

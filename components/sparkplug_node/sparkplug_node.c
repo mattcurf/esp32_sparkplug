@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Matt Curfman
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "sparkplug_node.h"
 
 #include <stdio.h>
@@ -44,6 +49,28 @@ esp_err_t sparkplug_node_build_topic(
         config->group_id,
         suffix,
         config->node_id);
+    if (written < 0) {
+        return ESP_FAIL;
+    }
+    if ((size_t)written >= buffer_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t sparkplug_node_build_state_topic(
+    const char *host_id,
+    char *buffer,
+    size_t buffer_size)
+{
+    int written = 0;
+
+    if (host_id == NULL || buffer == NULL || buffer_size == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    written = snprintf(buffer, buffer_size, "%s/STATE/%s", SPARKPLUG_NODE_TOPIC_NAMESPACE, host_id);
     if (written < 0) {
         return ESP_FAIL;
     }

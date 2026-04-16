@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Matt Curfman
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "sparkplug_session.h"
 
 #include <math.h>
@@ -41,6 +46,8 @@ typedef enum {
     SPARKPLUG_SESSION_CMD_MQTT_SUBSCRIBED,
     SPARKPLUG_SESSION_CMD_MQTT_REBIRTH_REQUEST,
     SPARKPLUG_SESSION_CMD_SET_DISCONNECT_SIM_ENABLED,
+    SPARKPLUG_SESSION_CMD_PRIMARY_HOST_ONLINE,
+    SPARKPLUG_SESSION_CMD_PRIMARY_HOST_OFFLINE,
 } sparkplug_session_cmd_type_t;
 
 typedef struct {
@@ -70,6 +77,10 @@ typedef struct {
     bool disconnect_sim_enabled;
     bool disconnect_sim_active;
     bool bdseq_initialized;
+    bool primary_host_configured;
+    bool primary_host_online;
+    bool state_subscribed;
+    int64_t primary_host_last_timestamp;
     uint32_t mqtt_reconnect_count;
     uint64_t bdseq;
     uint8_t seq;
@@ -84,9 +95,11 @@ typedef struct {
     char topic_ndata[SPARKPLUG_SESSION_TOPIC_MAX_LEN];
     char topic_ndeath[SPARKPLUG_SESSION_TOPIC_MAX_LEN];
     char topic_ncmd[SPARKPLUG_SESSION_TOPIC_MAX_LEN];
+    char topic_state[SPARKPLUG_SESSION_TOPIC_MAX_LEN];
     uint8_t will_payload[SPARKPLUG_SESSION_PAYLOAD_MAX_LEN];
     size_t will_payload_len;
     int ncmd_subscribe_msg_id;
+    int state_subscribe_msg_id;
     sparkplug_session_status_t status_snapshot;
 } sparkplug_session_state_t;
 
@@ -161,6 +174,8 @@ static void sparkplug_session_refresh_status(void)
     s_state.status_snapshot.disconnect_sim_active = s_state.disconnect_sim_active;
     s_state.status_snapshot.disconnect_sim_interval_ms = SPARKPLUG_SESSION_DISCONNECT_SIM_INTERVAL_MS;
     s_state.status_snapshot.disconnect_sim_duration_ms = SPARKPLUG_SESSION_DISCONNECT_SIM_DURATION_MS;
+    s_state.status_snapshot.primary_host_configured = s_state.primary_host_configured;
+    s_state.status_snapshot.primary_host_online = s_state.primary_host_online;
     s_state.status_snapshot.mqtt_reconnect_count = s_state.mqtt_reconnect_count;
     s_state.status_snapshot.bdseq = s_state.bdseq;
     s_state.status_snapshot.seq = s_state.seq;
@@ -422,10 +437,28 @@ static esp_err_t sparkplug_session_prepare_topics(void)
     if (err != ESP_OK) {
         return err;
     }
-    return sparkplug_node_build_topic(&topic_config,
-                                      SPARKPLUG_NODE_TOPIC_NCMD,
-                                      s_state.topic_ncmd,
-                                      sizeof(s_state.topic_ncmd));
+    err = sparkplug_node_build_topic(&topic_config,
+                                     SPARKPLUG_NODE_TOPIC_NCMD,
+                                     s_state.topic_ncmd,
+                                     sizeof(s_state.topic_ncmd));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const char *primary_host_id = app_config_get()->sparkplug.primary_host_id;
+    s_state.primary_host_configured = primary_host_id != NULL;
+    if (s_state.primary_host_configured) {
+        err = sparkplug_node_build_state_topic(primary_host_id,
+                                               s_state.topic_state,
+                                               sizeof(s_state.topic_state));
+        if (err != ESP_OK) {
+            return err;
+        }
+    } else {
+        s_state.topic_state[0] = '\0';
+    }
+
+    return ESP_OK;
 }
 
 static esp_err_t sparkplug_session_prepare_will_payload(uint64_t bdseq)
@@ -453,6 +486,7 @@ static void sparkplug_session_destroy_client(void)
     s_state.mqtt_started = false;
     s_state.mqtt_connected = false;
     s_state.ncmd_subscribed = false;
+    s_state.state_subscribed = false;
     s_state.birth_complete = false;
     s_state.session_active = false;
     sparkplug_session_refresh_status();
@@ -562,8 +596,12 @@ static esp_err_t sparkplug_session_start_client(void)
     s_state.seq = 0U;
     s_state.birth_complete = false;
     s_state.ncmd_subscribed = false;
+    s_state.state_subscribed = false;
     s_state.session_active = false;
+    s_state.primary_host_online = false;
+    s_state.primary_host_last_timestamp = -1;
     s_state.ncmd_subscribe_msg_id = -1;
+    s_state.state_subscribe_msg_id = -1;
     sparkplug_session_set_last_message("");
 
     ESP_RETURN_ON_ERROR(sparkplug_session_prepare_topics(), TAG, "failed to build Sparkplug topics");
@@ -607,11 +645,17 @@ static esp_err_t sparkplug_session_start_client(void)
     return ESP_OK;
 }
 
+static bool sparkplug_session_primary_host_ready(void)
+{
+    return !s_state.primary_host_configured || s_state.primary_host_online;
+}
+
 static void sparkplug_session_maybe_publish_after_sample(bool force_publish)
 {
     esp_err_t err;
 
-    if (!s_state.birth_complete && s_state.mqtt_connected && s_state.ncmd_subscribed && s_state.has_temperature) {
+    if (!s_state.birth_complete && s_state.mqtt_connected && s_state.ncmd_subscribed
+        && s_state.has_temperature && sparkplug_session_primary_host_ready()) {
         err = sparkplug_session_publish_birth();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "failed to publish NBIRTH: %s", esp_err_to_name(err));
@@ -619,7 +663,8 @@ static void sparkplug_session_maybe_publish_after_sample(bool force_publish)
         return;
     }
 
-    if (s_state.rebirth_pending && s_state.mqtt_connected && s_state.ncmd_subscribed && s_state.has_temperature) {
+    if (s_state.rebirth_pending && s_state.mqtt_connected && s_state.ncmd_subscribed
+        && s_state.has_temperature && sparkplug_session_primary_host_ready()) {
         err = sparkplug_session_publish_birth();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "failed to publish rebirth NBIRTH: %s", esp_err_to_name(err));
@@ -697,15 +742,28 @@ static void sparkplug_session_handle_command(const sparkplug_session_cmd_t *cmd)
         } else {
             ESP_LOGI(TAG, "subscribed to %s msg_id=%d", s_state.topic_ncmd, s_state.ncmd_subscribe_msg_id);
         }
+        if (s_state.primary_host_configured) {
+            s_state.state_subscribe_msg_id = esp_mqtt_client_subscribe(s_state.client, s_state.topic_state, 1);
+            if (s_state.state_subscribe_msg_id < 0) {
+                ESP_LOGE(TAG, "failed to subscribe to STATE topic");
+            } else {
+                ESP_LOGI(TAG, "subscribed to %s msg_id=%d", s_state.topic_state, s_state.state_subscribe_msg_id);
+            }
+        }
         break;
     case SPARKPLUG_SESSION_CMD_MQTT_SUBSCRIBED:
         s_state.ncmd_subscribed = true;
+        if (s_state.primary_host_configured) {
+            s_state.state_subscribed = true;
+        }
         sparkplug_session_refresh_status();
         sparkplug_session_maybe_publish_after_sample(false);
         break;
     case SPARKPLUG_SESSION_CMD_MQTT_DISCONNECTED:
         s_state.mqtt_connected = false;
         s_state.ncmd_subscribed = false;
+        s_state.state_subscribed = false;
+        s_state.primary_host_online = false;
         s_state.birth_complete = false;
         s_state.session_active = false;
         s_state.mqtt_reconnect_count++;
@@ -714,11 +772,117 @@ static void sparkplug_session_handle_command(const sparkplug_session_cmd_t *cmd)
             sparkplug_session_schedule_reconnect_attempt(1000);
         }
         break;
+    case SPARKPLUG_SESSION_CMD_PRIMARY_HOST_ONLINE:
+        s_state.primary_host_online = true;
+        ESP_LOGI(TAG, "primary host is ONLINE");
+        sparkplug_session_refresh_status();
+        sparkplug_session_maybe_publish_after_sample(false);
+        break;
+    case SPARKPLUG_SESSION_CMD_PRIMARY_HOST_OFFLINE:
+        if (s_state.primary_host_online) {
+            ESP_LOGW(TAG, "primary host is OFFLINE, publishing NDEATH and disconnecting");
+            s_state.primary_host_online = false;
+            if (s_state.mqtt_connected) {
+                err = sparkplug_session_publish_death();
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "failed to publish NDEATH on primary host offline: %s", esp_err_to_name(err));
+                }
+            }
+            sparkplug_session_destroy_client();
+            if (s_state.reconnect_enabled) {
+                sparkplug_session_schedule_reconnect_attempt(1000);
+            }
+        } else {
+            ESP_LOGI(TAG, "primary host is not yet online, waiting for STATE online");
+        }
+        break;
     default:
         break;
     }
 
     sparkplug_session_refresh_status();
+}
+
+static const char *sparkplug_session_find_json_key(const char *json, size_t json_len, const char *key)
+{
+    char pattern[64];
+    int n = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(pattern)) {
+        return NULL;
+    }
+    size_t pattern_len = (size_t)n;
+    if (pattern_len > json_len) {
+        return NULL;
+    }
+    const char *found = NULL;
+    for (size_t i = 0; i <= json_len - pattern_len; i++) {
+        if (memcmp(json + i, pattern, pattern_len) == 0) {
+            found = json + i;
+            break;
+        }
+    }
+    if (found == NULL) {
+        return NULL;
+    }
+    const char *after_key = found + pattern_len;
+    const char *end = json + json_len;
+    while (after_key < end && (*after_key == ' ' || *after_key == ':')) {
+        after_key++;
+    }
+    return after_key < end ? after_key : NULL;
+}
+
+static bool sparkplug_session_parse_state_message(const char *data,
+                                                   int data_len,
+                                                   sparkplug_session_cmd_type_t *out_cmd)
+{
+    const char *val;
+    bool online = false;
+    int64_t timestamp = 0;
+
+    if (data == NULL || data_len <= 0 || out_cmd == NULL) {
+        return false;
+    }
+
+    val = sparkplug_session_find_json_key(data, (size_t)data_len, "online");
+    if (val == NULL) {
+        ESP_LOGW(TAG, "STATE payload missing 'online' field");
+        return false;
+    }
+    if (strncmp(val, "true", 4) == 0) {
+        online = true;
+    } else if (strncmp(val, "false", 5) == 0) {
+        online = false;
+    } else {
+        ESP_LOGW(TAG, "STATE payload 'online' is not a boolean");
+        return false;
+    }
+
+    val = sparkplug_session_find_json_key(data, (size_t)data_len, "timestamp");
+    if (val == NULL) {
+        ESP_LOGW(TAG, "STATE payload missing 'timestamp' field");
+        return false;
+    }
+    {
+        char *endptr = NULL;
+        long long parsed = strtoll(val, &endptr, 10);
+        if (endptr == val) {
+            ESP_LOGW(TAG, "STATE payload 'timestamp' is not a number");
+            return false;
+        }
+        timestamp = (int64_t)parsed;
+    }
+
+    if (s_state.primary_host_last_timestamp >= 0 && timestamp < s_state.primary_host_last_timestamp) {
+        ESP_LOGW(TAG, "STATE timestamp %lld < previous %lld, ignoring stale message",
+                 (long long)timestamp, (long long)s_state.primary_host_last_timestamp);
+        return false;
+    }
+
+    s_state.primary_host_last_timestamp = timestamp;
+    *out_cmd = online ? SPARKPLUG_SESSION_CMD_PRIMARY_HOST_ONLINE
+                      : SPARKPLUG_SESSION_CMD_PRIMARY_HOST_OFFLINE;
+    return true;
 }
 
 static void sparkplug_session_task(void *arg)
@@ -757,17 +921,27 @@ static void sparkplug_session_mqtt_event_handler(void *handler_args,
         cmd.type = SPARKPLUG_SESSION_CMD_MQTT_SUBSCRIBED;
         break;
     case MQTT_EVENT_DATA:
-        if (event != NULL
-            && event->topic_len == (int)strlen(s_state.topic_ncmd)
-            && strncmp(event->topic, s_state.topic_ncmd, (size_t)event->topic_len) == 0
-            && event->current_data_offset == 0
-            && event->data_len == event->total_data_len) {
+        if (event == NULL || event->current_data_offset != 0
+            || event->data_len != event->total_data_len) {
+            return;
+        }
+        if (event->topic_len == (int)strlen(s_state.topic_ncmd)
+            && strncmp(event->topic, s_state.topic_ncmd, (size_t)event->topic_len) == 0) {
             sparkplug_node_ncmd_t decoded = {0};
             if (sparkplug_node_decode_ncmd((const uint8_t *)event->data,
                                            (size_t)event->data_len,
                                            &decoded) == ESP_OK
                 && decoded.rebirth_requested) {
                 cmd.type = SPARKPLUG_SESSION_CMD_MQTT_REBIRTH_REQUEST;
+            } else {
+                return;
+            }
+        } else if (s_state.primary_host_configured
+                   && event->topic_len == (int)strlen(s_state.topic_state)
+                   && strncmp(event->topic, s_state.topic_state, (size_t)event->topic_len) == 0) {
+            sparkplug_session_cmd_type_t state_cmd;
+            if (sparkplug_session_parse_state_message(event->data, event->data_len, &state_cmd)) {
+                cmd.type = state_cmd;
             } else {
                 return;
             }

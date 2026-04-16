@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Matt Curfman
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 #include <stdbool.h>
@@ -99,6 +104,11 @@ esp_err_t sparkplug_node_decode_ncmd(
     const uint8_t *buffer,
     size_t buffer_size,
     sparkplug_node_ncmd_t *command);
+
+esp_err_t sparkplug_node_build_state_topic(
+    const char *host_id,
+    char *buffer,
+    size_t buffer_size);
 
 #ifdef __cplusplus
 }

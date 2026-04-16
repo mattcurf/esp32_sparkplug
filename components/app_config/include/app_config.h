@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Matt Curfman
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 #include <stdbool.h>
@@ -32,6 +37,7 @@ typedef struct {
     uint16_t metric_rebirth_alias;
     uint16_t metric_temperature_alias;
     uint16_t metric_synthetic_alias;
+    const char *primary_host_id;
 } app_config_sparkplug_t;
 
 typedef struct {
@@ -72,6 +78,18 @@ typedef struct {
 } app_config_t;
 
 const app_config_t *app_config_get(void);
+
+/**
+ * Resolve the sparkplug node_id. If a name is stored in NVS it is used;
+ * otherwise a random name is generated and persisted. Call once after
+ * nvs_flash_init().
+ */
+esp_err_t app_config_init(void);
+
+/**
+ * Erase the persisted node_id from NVS. Takes effect on next reboot.
+ */
+esp_err_t app_config_reset_node_id(void);
 
 #ifdef __cplusplus
 }

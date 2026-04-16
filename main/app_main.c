@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Matt Curfman
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -26,6 +31,8 @@
 #define STATUS_LED_TASK_INTERVAL_MS 50U
 #define STATUS_LED_PULSE_PERIOD_MS 500U
 #define STATUS_LED_PULSE_ON_MS 100U
+#define STATUS_LED_SLOW_BLINK_PERIOD_MS 2000U
+#define STATUS_LED_SLOW_BLINK_ON_MS 1000U
 #define SENSOR_TASK_STACK_SIZE 4096
 #define SENSOR_TASK_PRIORITY 5
 
@@ -40,12 +47,14 @@ typedef struct {
 typedef enum {
     APP_STATUS_LED_MODE_OFF = 0,
     APP_STATUS_LED_MODE_PULSE,
+    APP_STATUS_LED_MODE_SLOW_BLINK,
     APP_STATUS_LED_MODE_ON,
 } app_status_led_mode_t;
 
 static app_sensor_snapshot_t s_sensor_snapshot;
 static portMUX_TYPE s_sensor_snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_status_led_mqtt_connected;
+static bool s_status_led_waiting_for_primary_host;
 static portMUX_TYPE s_status_led_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void app_set_status_led(bool on)
@@ -60,14 +69,20 @@ static void app_set_status_led(bool on)
     ESP_ERROR_CHECK(gpio_set_level(status_led->gpio_num, level));
 }
 
-static bool app_status_led_mqtt_connected(void)
-{
+typedef struct {
     bool mqtt_connected;
+    bool waiting_for_primary_host;
+} app_status_led_snapshot_t;
+
+static app_status_led_snapshot_t app_status_led_get_snapshot(void)
+{
+    app_status_led_snapshot_t snap;
 
     portENTER_CRITICAL(&s_status_led_state_lock);
-    mqtt_connected = s_status_led_mqtt_connected;
+    snap.mqtt_connected = s_status_led_mqtt_connected;
+    snap.waiting_for_primary_host = s_status_led_waiting_for_primary_host;
     portEXIT_CRITICAL(&s_status_led_state_lock);
-    return mqtt_connected;
+    return snap;
 }
 
 static void app_handle_sparkplug_status_update(const sparkplug_session_status_t *status, void *ctx)
@@ -79,6 +94,7 @@ static void app_handle_sparkplug_status_update(const sparkplug_session_status_t 
 
     portENTER_CRITICAL(&s_status_led_state_lock);
     s_status_led_mqtt_connected = status->mqtt_connected;
+    s_status_led_waiting_for_primary_host = status->primary_host_configured && !status->primary_host_online;
     portEXIT_CRITICAL(&s_status_led_state_lock);
 }
 
@@ -111,7 +127,11 @@ static void app_status_led_task(void *arg)
     (void)arg;
 
     while (true) {
-        if (app_status_led_mqtt_connected()) {
+        app_status_led_snapshot_t snap = app_status_led_get_snapshot();
+
+        if (snap.mqtt_connected && snap.waiting_for_primary_host) {
+            mode = APP_STATUS_LED_MODE_SLOW_BLINK;
+        } else if (snap.mqtt_connected) {
             mode = APP_STATUS_LED_MODE_ON;
         } else if (wifi_manager_has_ip()) {
             mode = APP_STATUS_LED_MODE_PULSE;
@@ -127,6 +147,13 @@ static void app_status_led_task(void *arg)
         switch (mode) {
         case APP_STATUS_LED_MODE_ON:
             app_set_status_led(true);
+            break;
+        case APP_STATUS_LED_MODE_SLOW_BLINK:
+            app_set_status_led(pulse_elapsed_ms < STATUS_LED_SLOW_BLINK_ON_MS);
+            pulse_elapsed_ms += STATUS_LED_TASK_INTERVAL_MS;
+            if (pulse_elapsed_ms >= STATUS_LED_SLOW_BLINK_PERIOD_MS) {
+                pulse_elapsed_ms = 0;
+            }
             break;
         case APP_STATUS_LED_MODE_PULSE:
             app_set_status_led(pulse_elapsed_ms < STATUS_LED_PULSE_ON_MS);
@@ -269,6 +296,8 @@ static esp_err_t app_get_sparkplug_status(app_console_sparkplug_status_t *status
     status->rebirth_pending = session_status.rebirth_pending;
     status->disconnect_sim_enabled = session_status.disconnect_sim_enabled;
     status->disconnect_sim_active = session_status.disconnect_sim_active;
+    status->primary_host_configured = session_status.primary_host_configured;
+    status->primary_host_online = session_status.primary_host_online;
     status->disconnect_sim_interval_ms = session_status.disconnect_sim_interval_ms;
     status->disconnect_sim_duration_ms = session_status.disconnect_sim_duration_ms;
     status->bdseq = (uint8_t)(session_status.bdseq & 0xFFU);
@@ -359,6 +388,7 @@ void app_main(void)
     int64_t initial_sample_time_ms = 0;
 
     app_initialize_nvs();
+    ESP_ERROR_CHECK(app_config_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     app_initialize_status_led();
