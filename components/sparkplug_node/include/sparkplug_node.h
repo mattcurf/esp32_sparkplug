@@ -100,6 +100,11 @@ esp_err_t sparkplug_node_decode_ncmd(
     size_t buffer_size,
     sparkplug_node_ncmd_t *command);
 
+esp_err_t sparkplug_node_build_state_topic(
+    const char *host_id,
+    char *buffer,
+    size_t buffer_size);
+
 #ifdef __cplusplus
 }
 #endif

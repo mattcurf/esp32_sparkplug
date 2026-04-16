@@ -6,6 +6,7 @@
 
 #include "sdkconfig.h"
 
+#include "app_config.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_console.h"
@@ -210,6 +211,11 @@ static int cmd_status(int argc, char **argv)
                    sparkplug.bdseq,
                    sparkplug.seq,
                    sparkplug.last_message[0] != '\0' ? sparkplug.last_message : "<none>");
+            if (sparkplug.primary_host_configured) {
+                printf("sparkplug: primary_host_configured=%s primary_host_online=%s\n",
+                       app_bool_to_str(sparkplug.primary_host_configured),
+                       app_bool_to_str(sparkplug.primary_host_online));
+            }
             printf("sparkplug: disconnect_sim_enabled=%s disconnect_sim_active=%s\n",
                    app_bool_to_str(sparkplug.disconnect_sim_enabled),
                    app_bool_to_str(sparkplug.disconnect_sim_active));
@@ -359,6 +365,8 @@ static int cmd_sparkplug(int argc, char **argv)
     printf("sparkplug.session_active=%s\n", app_bool_to_str(status.session_active));
     printf("sparkplug.birth_complete=%s\n", app_bool_to_str(status.birth_complete));
     printf("sparkplug.rebirth_pending=%s\n", app_bool_to_str(status.rebirth_pending));
+    printf("sparkplug.primary_host_configured=%s\n", app_bool_to_str(status.primary_host_configured));
+    printf("sparkplug.primary_host_online=%s\n", app_bool_to_str(status.primary_host_online));
     printf("sparkplug.disconnect_sim_enabled=%s\n", app_bool_to_str(status.disconnect_sim_enabled));
     printf("sparkplug.disconnect_sim_active=%s\n", app_bool_to_str(status.disconnect_sim_active));
     printf("sparkplug.bdSeq=%u\n", status.bdseq);
@@ -451,6 +459,23 @@ static int cmd_rebirth(int argc, char **argv)
                                             providers.rebirth_ctx);
 }
 
+static int cmd_reset_name(int argc, char **argv)
+{
+    if (argc != 1) {
+        printf("usage: reset_name\n");
+        return 1;
+    }
+
+    esp_err_t err = app_config_reset_node_id();
+    if (err != ESP_OK) {
+        printf("reset_name: failed (%s)\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("reset_name: node_id erased from NVS; restart to assign a new name\n");
+    return 0;
+}
+
 static int cmd_restart(int argc, char **argv)
 {
     if (argc != 1) {
@@ -498,6 +523,7 @@ static esp_err_t app_console_register_commands_once(void)
         {"disconnect_sim", "Control the periodic Sparkplug disconnect simulator", cmd_disconnect_sim},
         {"publish", "Request an immediate NDATA publish", cmd_publish},
         {"rebirth", "Request a fresh NBIRTH sequence", cmd_rebirth},
+        {"reset_name", "Erase persisted node_id; a new name is assigned on restart", cmd_reset_name},
         {"restart", "Restart the device", cmd_restart},
     };
 

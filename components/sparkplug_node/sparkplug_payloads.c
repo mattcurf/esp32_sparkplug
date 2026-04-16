@@ -133,7 +133,6 @@ esp_err_t sparkplug_node_encode_nbirth(
         },
         {
             .name = SPARKPLUG_NODE_METRIC_NAME_NODE_CONTROL_REBIRTH,
-            .has_alias = true,
             .alias = SPARKPLUG_NODE_METRIC_ALIAS_NODE_CONTROL_REBIRTH,
             .has_datatype = true,
             .datatype = org_eclipse_tahu_protobuf_DataType_Boolean,

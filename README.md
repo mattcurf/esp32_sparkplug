@@ -21,13 +21,12 @@ The original project code in this repository is licensed under Apache 2.0. This 
 - `sensor_tmp36`: ADC oneshot init, calibration, 32-sample averaging, millivolt conversion, Celsius conversion, and cached reading snapshots
 - `wifi_manager`: station init/start, reconnect handling, and status queries
 - `time_sync`: SNTP startup, valid-time gating, and time status queries
-- `sparkplug_node`: vendored Sparkplug schema + nanopb runtime, topic building, payload encode/decode, MQTT session ownership, birth/death lifecycle, rebirth handling, publish policy, and periodic disconnect simulation for Primary host death handling
+- `sparkplug_node`: vendored Sparkplug schema + nanopb runtime, topic building, payload encode/decode, MQTT session ownership, birth/death lifecycle, rebirth handling, publish policy, optional Primary Host Application (`PHID`) wait, and periodic disconnect simulation for Primary host death handling
 - `app_console`: UART REPL with runtime diagnostics and manual publish/rebirth actions
 - `app_main`: startup ordering, top-level wiring, and MQTT connection status LED updates
 
 ## Deliberate Out-Of-Scope Items
 - No Device support (`DBIRTH` / `DDATA` / `DDEATH` / `DCMD`). This firmware is intentionally node-only, and Sparkplug devices are optional.
-- No Primary Host wait (`PHID`). This implementation does not delay node birth publication waiting for a Primary Host identity, which is optional per the spec.
 - No multi-MQTT-server support. This is optional per the spec and only relevant when a Primary Host is configured to coordinate multiple brokers.
 
 ## Fixed Runtime Inputs
@@ -48,6 +47,7 @@ Before flashing real hardware, update the placeholder connection settings in [co
 - if your broker requires authentication, set `.sparkplug.username` and `.sparkplug.password`
 - if your broker does not require authentication, leave `.sparkplug.username` and `.sparkplug.password` as `NULL`
 - if your board uses a different LED pin or LED polarity, update `.status_led.gpio_num` and `.status_led.active_high`
+- to enable Primary Host Application wait, set `.sparkplug.primary_host_id` to the host application ID (for example `"scada_host"`); leave it as `NULL` to publish NBIRTH immediately without waiting for a host
 
 For TLS brokers, point `.sparkplug.broker_uri` at an `mqtts://` endpoint such as `mqtts://broker-host-or-ip:8883` and replace the embedded CA chain in [components/sparkplug_node/certs/ca-chain.cert.pem](components/sparkplug_node/certs/ca-chain.cert.pem) with the PEM chain that signs your broker certificate.
 
@@ -57,7 +57,8 @@ The status LED is driven from the connection state:
 
 - off while booting or whenever Wi-Fi does not yet have an IP address
 - brief pulse every `0.5 s` while Wi-Fi is up but MQTT is not yet connected
-- solid on while the node is connected to the MQTT broker
+- slow blink (`1 s` on / `1 s` off) while MQTT is connected but waiting for a configured Primary Host to come online
+- solid on while the node is connected to the MQTT broker and the Primary Host is online (or no Primary Host is configured)
 
 ## Published Metrics
 The node publishes these Sparkplug metrics:
@@ -76,6 +77,7 @@ The firmware uses these exact node-level topics:
 - `spBv1.0/home/NDATA/sensor`
 - `spBv1.0/home/NDEATH/sensor`
 - subscribes to `spBv1.0/home/NCMD/sensor`
+- subscribes to `STATE/<primary_host_id>` when a Primary Host is configured
 
 Implemented message types:
 
@@ -83,6 +85,15 @@ Implemented message types:
 - `NDATA`
 - `NDEATH`
 - `NCMD` rebirth decode
+
+## Primary Host Application (PHID)
+
+When `.sparkplug.primary_host_id` is set to a non-`NULL` string, the edge node subscribes to the `STATE/<primary_host_id>` topic after connecting to the MQTT broker and gates its `NBIRTH` until the Primary Host publishes a `STATE` message with `{"online":true, "timestamp":...}`. Per the Sparkplug 3.0 specification:
+
+- the node validates the `online` boolean and `timestamp` fields in each `STATE` payload
+- stale `STATE` messages (timestamp less than the previously received value) are ignored
+- when the Primary Host goes offline (valid `STATE` with `online` set to `false`), the node publishes `NDEATH`, disconnects, and reconnects to wait for the host again
+- when `primary_host_id` is `NULL` (the default), the node publishes `NBIRTH` immediately after subscribing to `NCMD`, preserving the original behavior
 
 ## Disconnect Simulation
 

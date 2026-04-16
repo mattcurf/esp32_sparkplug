@@ -1,6 +1,22 @@
 #include "app_config.h"
 
-static const app_config_t s_app_config = {
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "esp_random.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+#define APP_CONFIG_NVS_NAMESPACE "app_config"
+#define APP_CONFIG_NVS_KEY_NODE_ID "node_id"
+#define APP_CONFIG_NODE_ID_MAX_LEN 32
+
+static const char *TAG = "app_config";
+
+static char s_node_id_buf[APP_CONFIG_NODE_ID_MAX_LEN + 1];
+
+static app_config_t s_app_config = {
     .target_chip = "esp32",
     .wifi = {
         .ssid = "YOUR_WIFI_SSID",
@@ -11,7 +27,7 @@ static const app_config_t s_app_config = {
         .username = NULL,
         .password = NULL,
         .group_id = "home",
-        .node_id = "sensor",
+        .node_id = NULL,
         .topic_nbirth = "spBv1.0/home/NBIRTH/sensor",
         .topic_ndata = "spBv1.0/home/NDATA/sensor",
         .topic_ndeath = "spBv1.0/home/NDEATH/sensor",
@@ -23,6 +39,7 @@ static const app_config_t s_app_config = {
         .metric_rebirth_alias = 1,
         .metric_temperature_alias = 2,
         .metric_synthetic_alias = 3,
+        .primary_host_id = "host-1",
     },
     .sensor = {
         .gpio_num = GPIO_NUM_32,
@@ -52,4 +69,67 @@ static const app_config_t s_app_config = {
 const app_config_t *app_config_get(void)
 {
     return &s_app_config;
+}
+
+static void app_config_generate_node_id(char *buf, size_t buf_size)
+{
+    uint32_t r = esp_random();
+    snprintf(buf, buf_size, "node-%08lx", (unsigned long)r);
+}
+
+esp_err_t app_config_init(void)
+{
+    if (s_app_config.sparkplug.node_id != NULL) {
+        return ESP_OK;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(APP_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    size_t len = sizeof(s_node_id_buf);
+    err = nvs_get_str(nvs, APP_CONFIG_NVS_KEY_NODE_ID, s_node_id_buf, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        app_config_generate_node_id(s_node_id_buf, sizeof(s_node_id_buf));
+        err = nvs_set_str(nvs, APP_CONFIG_NVS_KEY_NODE_ID, s_node_id_buf);
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs);
+        }
+        if (err != ESP_OK) {
+            nvs_close(nvs);
+            return err;
+        }
+        ESP_LOGI(TAG, "generated node_id: %s", s_node_id_buf);
+    } else if (err != ESP_OK) {
+        nvs_close(nvs);
+        return err;
+    } else {
+        ESP_LOGI(TAG, "loaded node_id from NVS: %s", s_node_id_buf);
+    }
+
+    nvs_close(nvs);
+    s_app_config.sparkplug.node_id = s_node_id_buf;
+    return ESP_OK;
+}
+
+esp_err_t app_config_reset_node_id(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(APP_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_erase_key(nvs, APP_CONFIG_NVS_KEY_NODE_ID);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+
+    nvs_close(nvs);
+    return err;
 }
