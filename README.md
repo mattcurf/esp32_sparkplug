@@ -1,3 +1,5 @@
+[![Build](https://github.com/mattcurf/esp32_sparkplug/actions/workflows/build.yml/badge.svg)](https://github.com/mattcurf/esp32_sparkplug/actions/workflows/build.yml)
+
 # Sparkplug B ESP32 Temperature Node
 ESP-IDF firmware for a classic ESP32 Sparkplug B node that reads a TMP36 on `GPIO32` / `ADC1_CHANNEL_4`, converts the reading to Celsius, and publishes Sparkplug B protobuf payloads over MQTT alongside a synthetic sinewave metric.
 
